@@ -18,7 +18,7 @@ MODEL="claude-haiku-4-5"
 MAX_TOKENS=10000
 TOOLS=[
                 {
-                    "name": "run_python",  # This is the name of the tool that will be used to execute the code
+                    "name": "run_python",  
                     "description": f"Python with pandas available, output must be printed to the console.",
                     "input_schema": {
                         "type": "object",
@@ -78,19 +78,19 @@ if __name__ == "__main__":
         response = call_model(messages)
         print(f"[turn {turn}] stop_reason: {response.stop_reason}")
 
-        for block in response.content:                 # 1. show thoughts — ALWAYS
+        for block in response.content:                 
             if block.type == "text":
                 print(block.text)
 
-        if response.stop_reason != "tool_use":         # 2. message-level check,
-            break                                      #    OUTSIDE the block loop
+        if response.stop_reason != "tool_use":         
+            break                                      
 
-        for block in response.content:                 # 3. extract the request
+        for block in response.content:                 
             if block.type == "tool_use":
                 block_id = block.id
                 code = block.input["code"]
 
-        print(f"--- running code (turn {turn}) ---")   # 4. watch it work
+        print(f"--- running code (turn {turn}) ---")   
         output = run_code(code)
 
         messages.append({"role": "assistant", "content": response.content})
