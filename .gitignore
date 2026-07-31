@@ -9,4 +9,5 @@ data/csvs/*
 runs/
 .DS_Store
 data/*
-.vscode/
+.vscode/MISSION.md
+DAY1.md
