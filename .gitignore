@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.ipynb_checkpoints/
+data/csvs/*
+!data/csvs/.gitkeep
+runs/
+.DS_Store
+data/*
+.vscode/

@@ -1,0 +1,11 @@
+# Decided stack — install per phase, not all today.
+# Day 1+ (core)
+anthropic        # or: openai — pick one provider, raw SDK
+pandas
+ipykernel
+load_dotenv
+# Day 6+ (evals)
+# (your harness — standard library + pandas should cover it)
+# Day 10+ (product)
+# rich
+# typer
