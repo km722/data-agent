@@ -6,10 +6,13 @@ import subprocess,sys
 
 load_dotenv()
 
+OUTPUT_DIR = 'outputs/'
+
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 csv_file = "data/messy_HR_data.csv"
 prompt = f"""Inspect and clean the {csv_file} file using the pandas library.
-            Print the cleaned dataframe to the console."""
+             Once you have fully finished cleaning the dataset, 1. save cleaned dataset as csv into the {OUTPUT_DIR} with the name 'cleaned_messy_HR_data.csv',
+             and 2. Save the results text as an md file into {OUTPUT_DIR} as 'results.md' """
 
 
 
@@ -77,6 +80,8 @@ if __name__ == "__main__":
     for turn in range(MAX_TURNS):
         response = call_model(messages)
         print(f"[turn {turn}] stop_reason: {response.stop_reason}")
+        print(f'--response--\n{response.content}')
+        
 
         for block in response.content:                 
             if block.type == "text":
