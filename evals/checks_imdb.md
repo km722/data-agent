@@ -86,6 +86,31 @@ Scoring: each run starts at 100. Deductions apply per failed check. A run "passe
   (entirely NaN) merits dropping. General principle: every "no bad values" check needs a
   companion "and you kept the data" check.
 
+### CHK-09: Dates are real dates, not just ISO-shaped
+- **Claim:** Every non-null date value is a calendar date that actually exists. CHK-04 tests the
+  *shape* of the string; this tests whether the date is real.
+- **Mechanical test:** `pd.to_datetime(df['release_date'], format='%Y-%m-%d', errors='coerce')`
+  produces no new NaT for values that were non-null before the parse.
+- **Severity:** high
+- **Origin:** 2026-08-08 run: 4 values passed CHK-04's regex while being impossible —
+  `1972-21-09` and `1946-21-11` (month 21), `1984-02-34` (day 34), `1976-13-24` (month 13).
+  Cause: the agent's parser read `09 21 1972` as DD-MM-YYYY when it is MM-DD-YYYY. General
+  principle: a regex validates format, never meaning. Any check whose test is a pattern match
+  needs a companion check that parses.
+
+### CHK-10: Numeric magnitudes survive cleaning
+- **Claim:** Cleaning a numeric field must not silently truncate its magnitude. A value that was
+  hundreds of millions in the raw file must not become single digits in the output.
+- **Mechanical test:** for each numeric column, no cleaned value is smaller than the largest
+  contiguous digit-run in its own raw string by more than one order of magnitude.
+  Cheap proxy for this dataset: `df['income'].min() >= 1000`.
+- **Severity:** maximum
+- **Origin:** 2026-08-08 run: raw `"$ 4o8,035,783"` (letter 'o' typed for zero) was cleaned with
+  `re.match(r'^(\d+)', val)`, which matched `4` and stopped at the `o`. $408,035,783 became $4.
+  Scored 0 penalty because no check covered `income` at all. General principle: every numeric
+  column that gets a bespoke parser needs a magnitude check, because regex-based extraction fails
+  by truncating silently rather than raising.
+
 ## Report-honesty checks
 - Any statistical data analysis computations should be backed by clear, reproducible code and not just stated plainly: e.g., counts stated in the agent's report match recounts from the actual CSV.
   (Documented precedent: HR report invented "99.2% completeness"; IMDB BEFORE_AFTER doc
@@ -102,3 +127,81 @@ Scoring: each run starts at 100. Deductions apply per failed check. A run "passe
   rather than guess.
 - Rule: when a row's title is missing OR corrupted (mojibake) and the row has a valid IMDB ID,
   the agent must recover the correct title by passing that ID to the tool.
+
+## Run log
+
+### 2026-08-08 — first run with two tools registered
+Command: `python agent/agent.py data/messy_IMDB_dataset.csv` · model `claude-haiku-4-5` · 15 turns (hit cap)
+
+**Score: 86/100 — pass.**
+
+| Check | Result | Evidence |
+|---|---|---|
+| CHK-01 | PASS | 11 columns, comma-delimited |
+| CHK-02 | PASS | Score 7.4–9.3, 2 NaN (unparseable, coerced not invented) |
+| CHK-03 | PASS | no empty titles |
+| CHK-04 | FAIL −3 | `Release_year` = `1995.0`, `1972.0` — year only, and float dtype (NaN coercion) |
+| CHK-05 | PASS | |
+| CHK-06 | FAIL −3 | typos fixed (`New Zesland`→`New Zealand`, `Italy1`→`Italy`) but canonical form wrong: `USA`, `UK`; `West Germany` kept silently |
+| CHK-07 | FAIL −8 | 4 rows: `LÃ©on`, `WALLÂ·E`, `Le fabuleux destin d'AmÃ©lie Poulain`, `Per qualche dollaro in piÃ¹` |
+| CHK-08 | PASS | 100 of 101 rows retained |
+
+**Report-honesty: PASS, but fragile.** Every checkable claim recounted correctly against the CSV
+(13 missing values, 1 row removed, 13 countries, 59 genres, 64 directors, rating breakdown).
+However those figures were written as hardcoded string literals in the report-generating code,
+not computed from the DataFrame — correct for this run, silently wrong on any other. The current
+check ("do stated counts match the data?") passes this. A stronger check would ask whether the
+number was computed or typed.
+
+**Engine-level observations (not check failures):**
+- `lookup_imdb_title` was called **0 times** in 15 turns despite being registered with an explicit
+  mojibake trigger in its description. The agent fixed mojibake in *column names* via a hardcoded
+  rename map and never inspected the *data* for it. Root cause is likely the absent system prompt:
+  nothing instructs the agent to go looking for corrupted titles, so the tool's "use it when you
+  find one" description never activates. CHK-07 failure follows directly.
+- Hit MAX_TURNS. Both output files were written at turn 11; turns 12–14 were "verify the files
+  exist", "one final comparison", "display the full report" — padding after the work was done,
+  ending with no final answer. Stopping problem, first live instance.
+- Turns 6 and 9 crashed on `df` not surviving between `run_python` calls. The "each call runs in a
+  FRESH process" line in the tool description helped the agent recover in one turn each time, but
+  did not prevent the assumption. ~4 of 15 turns lost to this.
+
+### 2026-08-08 — run 4: full system prompt, provenance rule, engine-side stop
+Command: `python agent/agent.py data/messy_IMDB_dataset.csv` · model `claude-haiku-4-5` ·
+stopped at turn 11 of 25 via engine file-existence check.
+
+**Score: 97/100 — pass.** CHK-06 the only failure (−3).
+CHK-01 ✓ · CHK-02 ✓ · CHK-03 ✓ · CHK-04 ✓ · CHK-05 ✓ · CHK-06 ✗ · CHK-07 ✓ · CHK-08 ✓
+
+**What changed since run 3:** SYSTEM_PROMPT gained a full output contract, a numbered WORKING
+METHOD with a save-early mandate, and a PROVENANCE section. MAX_TURNS 15 → 25. Engine-side stop
+added (break when both output paths exist).
+
+**All three interventions worked, and each is attributable:**
+- *Save-early:* CSV written at turn 6, then read back at turns 7, 8, 10, 11. The re-paste-from-raw
+  loop that killed runs 2 and 3 did not occur. This is what freed enough turns to finish.
+- *Engine stop:* fired at turn 11, 14 turns under the cap. First run ever to terminate on purpose.
+- *Provenance rule:* 3 unparseable release dates were left NULL and listed in the report as
+  unrecoverable. Run 3, under the narrower failure-scoped wording, invented 5 dates from model
+  memory in a hardcoded dict. The agent also volunteered a "Provenance Notes" section naming its
+  two permitted sources. Widening the rule from "when a tool fails" to "origin regardless of
+  outcome" is what closed it.
+- *CHK-07:* first pass. 4 genuine OMDb calls, 0 mojibake remaining.
+
+**The important finding: the score is flattering.** Three real defects scored zero.
+1. Four impossible dates passed CHK-04 (see CHK-09, added).
+2. `income` for tt0071562 went from `$ 4o8,035,783` to `4` — maximum-severity silent corruption,
+   uncaught because no check covered income (see CHK-10, added).
+3. Enrichment changed the *meaning* of `original_title`. OMDb's `Title` field returns the English
+   release title, so `Léon` → `Léon: The Professional`, `Le fabuleux destin d'Amélie Poulain` →
+   `Amélie`, `Per qualche dollaro in più` → `For a Few Dollars More`. Mojibake is gone and CHK-07
+   passes; the column no longer holds original titles. OPEN DECISION: either the tool should
+   request OMDb's original-title field, or the column contract should say it holds the English
+   title. Not yet resolved, so no check written.
+
+**CHK-06 regressed.** Run 1 produced `USA`; this run standardised `USA` → `US`, moving further
+from the canonical `United States`. `evals/countries_iso3166.csv` now exists but nothing in the
+prompt or tools tells the agent it is there.
+
+**Score history:** run 1 = 86 · run 2 = no output (max turns) · run 3 = no output (max turns) ·
+run 4 = 97.
