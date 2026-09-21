@@ -1,12 +1,5 @@
-# Decided stack — install per phase, not all today.
-# Day 1+ (core)
-anthropic        # or: openai — pick one provider, raw SDK
+anthropic
 pandas
-ipykernel
-python-dotenv    # provides `from dotenv import load_dotenv` (NOT the `load_dotenv` package)
-requests         # engine-side HTTP for the OMDb lookup tool
-# Day 6+ (evals)
-# (your harness — standard library + pandas should cover it)
-# Day 10+ (product)
-# rich
-# typer
+python-dotenv
+requests
+ftfy

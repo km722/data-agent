@@ -22,10 +22,19 @@ OUTPUT CONTRACT
 - Dates are full ISO format, YYYY-MM-DD. Reducing a date to its year alone is NOT acceptable. If a
   source value genuinely carries no day or month, leave it null rather than inventing one or
   silently degrading the format.
+- A date must be a real calendar date. After parsing, verify the month is 1-12 and the day exists
+  in that month. If a raw value cannot be read as a real date, leave it null and list it in the
+  report.
 - Numeric fields have numeric dtypes, and any field with a known valid range is validated against
   that range.
+- When parsing a number, compare the result to the digits in the raw string. If the parsed value
+  is more than 10x smaller, the parse failed: do not write it. If the error is an obvious typo
+  (e.g. '8o8' for '808'), correct it and put the raw value next to the corrected one in the
+  report. Otherwise leave it null and list it in the report.
 - Categorical values are canonical: no abbreviations, no typos, no near-duplicate spellings of the
   same value.
+- The canonical country list is in evals/countries_iso3166.csv. Read it and map every country to
+  a name in that file. Flag any you cannot map.
 
 WORKING METHOD — FOLLOW THIS ORDER
 1. Inspect the raw file first: encoding, delimiter, header row, shape. Assume none of them.
@@ -67,9 +76,10 @@ You are done once both requested output files exist at their exact paths and you
 their contents once. Then stop and give a short summary. Do not run further verification passes,
 do not re-print the dataset, and do not produce extra comparison output."""
 
-# CONSTANTS
 MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 10000
+MAX_TURNS = 25
+
 TOOLS: list[ToolParam] = [
     {
         "name": "run_python",
@@ -115,10 +125,10 @@ TOOLS: list[ToolParam] = [
         },
     },
 ]
-MAX_TURNS = 25
 
 
-# Tool 1: Execute python code
+# Tool 1: run the model's code in a fresh subprocess. Nothing survives between calls,
+# and a crash comes back as text so the model can read it and try again.
 def run_code(code: str) -> str:
     try:
         result = subprocess.run(
@@ -141,7 +151,8 @@ def run_code(code: str) -> str:
         return "Code ran successfully but printed nothing. Use print() to display any values you want to see."
 
 
-# Tool 2: Query IMDdb API by imdb id to retrieve missing movie title in messy_IMDB_dataset
+# Tool 2: recover a movie title from its IMDB id via OMDb. This runs in the engine,
+# not in the model's code, so the sandbox stays network-free.
 def lookup_imdb_title(imdb_id: str) -> str:
     base_url = "https://www.omdbapi.com/"
 
@@ -149,15 +160,14 @@ def lookup_imdb_title(imdb_id: str) -> str:
 
     try:
         response = requests.get(base_url, params=params)
-        response.raise_for_status()  # Only catches network/server errors (e.g., 404, 500)
+        response.raise_for_status()
 
         movie_data = response.json()
 
-        # Catch OMDb's internal error response
+        # OMDb reports its own errors inside a 200 response, so check the body too.
         if movie_data.get("Response") == "False":
             error_msg = movie_data.get("Error", "Unknown OMDb error")
             print(f"OMDb Error: {error_msg}")
-            # Return your custom fallback string here
             return f"Movie Not Found: {error_msg}"
         else:
             movie_title = movie_data.get("Title")
@@ -169,13 +179,12 @@ def lookup_imdb_title(imdb_id: str) -> str:
             return movie_title
 
     except requests.exceptions.RequestException as e:
-        # This only triggers if the website is down or the URL is broken
         print(f"Network/HTTP Error occurred: {e}")
         return "Error occurred while fetching movie title"
 
 
 def call_model(messages: list) -> Message:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=5)
 
     response = client.messages.create(
         model=MODEL,
@@ -212,12 +221,17 @@ if __name__ == "__main__":
     cleaned_path = output_dir / f"cleaned_{stem}.csv"
     report_path = output_dir / f"results_{stem}.md"
 
+    # Clear leftovers from earlier runs, otherwise the stop check below fires immediately.
+    cleaned_path.unlink(missing_ok=True)
+    report_path.unlink(missing_ok=True)
+
     prompt = f"""Inspect and clean the {csv_file_path} file using the pandas library.
-             Once you have fully finished cleaning the dataset: 
-             1. Save cleaned dataset as csv into exaclty this path - {cleaned_path},
-             2. Save the results into exactly this path {report_path} """
+             Once you have fully finished cleaning the dataset:
+             1. Save the cleaned dataset as csv to exactly this path: {cleaned_path}
+             2. Save the report to exactly this path: {report_path}"""
 
     message: list[MessageParam] = [{"role": "user", "content": prompt}]
+    nudged = False
 
     for turn in range(MAX_TURNS):
         response = call_model(message)
@@ -261,13 +275,21 @@ if __name__ == "__main__":
                 )
 
         message.append({"role": "assistant", "content": response.content})
+
+        # Runs 2, 3 and 5 stalled here: the model kept rebuilding from raw instead of
+        # saving, and ran out of turns. One reminder, sent once, fixed it.
+        if turn >= 6 and not cleaned_path.exists() and not nudged:
+            turn_results.append({
+                "type": "text",
+                "text": f"You are {turn + 1} tool calls in and nothing is saved. Your next "
+                        f"run_python call must write the cleaned CSV to {cleaned_path}, "
+                        "even if it is imperfect. Improve it after it is on disk.",
+            })
+            nudged = True
         message.append({"role": "user", "content": turn_results})
 
-        # Engine-side stop. The task is defined by these two paths, so the engine can tell
-        # when it is finished without asking the model. This is a backstop under the
-        # "WHEN YOU ARE DONE" rule in SYSTEM_PROMPT, which should normally fire first.
-        # Requires BOTH files: the CSV is saved early on purpose, the report is written last,
-        # so the report is the real done-signal.
+        # Engine-side stop: the job is done when both files exist. The CSV is saved early
+        # on purpose, so the report is the real done signal.
         if cleaned_path.exists() and report_path.exists():
             print(f"[turn {turn}] both output files exist — stopping.")
             break

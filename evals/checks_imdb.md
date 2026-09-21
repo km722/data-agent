@@ -71,7 +71,8 @@ Scoring: each run starts at 100. Deductions apply per failed check. A run "passe
 - **Claim:** No title (or other text field) contains encoding-corruption signatures.
   Legitimate accented characters ('Léon') are correct and must NOT be flagged — the target
   is the mojibake pattern (UTF-8 read as latin-1), not non-English text.
-- **Mechanical test:** `~df['Original_Title'].str.contains('Ã|Â', na=False)` → must be all True
+- **Mechanical test:** `ftfy.badness.is_bad(title)` is False for every non-null title.
+  (Was a regex for 'Ã|Â'; ftfy catches more mojibake patterns and the harness uses it.)
 - **Severity:** high
 - **Origin:** Aug 2: cleaned output contained 'LÃ©on', 'WALLÂ·E', "AmÃ©lie", 'piÃ¹' —
   mixed-encoding file; latin-1 fallback mangled legitimately-UTF-8 titles. Persisted through
@@ -101,9 +102,10 @@ Scoring: each run starts at 100. Deductions apply per failed check. A run "passe
 ### CHK-10: Numeric magnitudes survive cleaning
 - **Claim:** Cleaning a numeric field must not silently truncate its magnitude. A value that was
   hundreds of millions in the raw file must not become single digits in the output.
-- **Mechanical test:** for each numeric column, no cleaned value is smaller than the largest
-  contiguous digit-run in its own raw string by more than one order of magnitude.
-  Cheap proxy for this dataset: `df['income'].min() >= 1000`.
+- **Mechanical test:** for each row, strip every non-digit from the raw income string
+  (`"$ 4o8,035,783"` → 48035783) and compare, by IMDB id, to the cleaned value. Fail if the
+  cleaned value is more than 10x smaller. Without the raw file the harness falls back to
+  `income.min() >= 1000`.
 - **Severity:** maximum
 - **Origin:** 2026-08-08 run: raw `"$ 4o8,035,783"` (letter 'o' typed for zero) was cleaned with
   `re.match(r'^(\d+)', val)`, which matched `4` and stopped at the `o`. $408,035,783 became $4.
@@ -127,6 +129,16 @@ Scoring: each run starts at 100. Deductions apply per failed check. A run "passe
   rather than guess.
 - Rule: when a row's title is missing OR corrupted (mojibake) and the row has a valid IMDB ID,
   the agent must recover the correct title by passing that ID to the tool.
+- **2026-09-21 — Obvious typos in numbers are corrected, and reported.** A letter `o` between
+  digits in a money field has one sensible reading. The agent corrects it to `0` and lists the
+  raw value next to the corrected one in the report, so a reader can disagree. Anything less
+  clear-cut stays null and is listed as unrecoverable. Same principle as the country rule.
+- **2026-09-21 — Open: the fully empty row.** PRESERVING DATA says an empty row *may* be
+  dropped; run 5 read that as *must keep*, kept it, and failed CHK-03 on its null title. Either
+  the prompt should say "drop it" or CHK-03 should ignore all-null rows. Not yet decided.
+- **2026-09-21 — Harness column names.** `evals/score.py` accepts the column names seen so far
+  (`release_date` or `release_year`, `original_title` or `title`) and fails anything else. The
+  stricter fix is to pin exact names in the output contract.
 
 ## Run log
 
@@ -203,5 +215,53 @@ added (break when both output paths exist).
 from the canonical `United States`. `evals/countries_iso3166.csv` now exists but nothing in the
 prompt or tools tells the agent it is there.
 
-**Score history:** run 1 = 86 · run 2 = no output (max turns) · run 3 = no output (max turns) ·
-run 4 = 97.
+**Score history (hand-scored):** run 1 = 86 · run 2 = no output (max turns) · run 3 = no output
+(max turns) · run 4 = 97.
+
+### 2026-09-21 — the harness re-scores every run
+`evals/score.py` now runs all ten checks automatically. Re-scoring the saved outputs:
+
+| Run | Hand score | Harness | Why they differ |
+|---|---|---|---|
+| 1 (Aug 1) | 86 | 70 | CHK-08 was passed by hand; the file has 95 of 101 rows. CHK-09 didn't exist. |
+| 4 (Aug 8) | 97 | 0 | CHK-09 caught four impossible dates (-8). CHK-10 caught `$4` (maximum, run scores 0). |
+
+Both gaps are the harness being stricter than I was. Hand-scoring skims; the script doesn't.
+
+### 2026-09-21 — run 5: harness-driven fixes, engine nudge
+Command: `python agent/agent.py data/messy_IMDB_dataset.csv` · model `claude-haiku-4-5` ·
+stopped at turn 16 via engine file-existence check.
+
+**Score: 92/100 — pass.** CHK-03 the only failure (-8).
+
+| Check | Result | Evidence |
+|---|---|---|
+| CHK-01 | PASS | 11 columns |
+| CHK-02 | PASS | min 7.4, max 9.3, 1 null |
+| CHK-03 | FAIL -8 | 1 null title: the fully empty raw row was kept (see Decisions) |
+| CHK-04 | PASS | |
+| CHK-05 | PASS | |
+| CHK-06 | PASS | first pass ever: `Korea, Republic of`, `Iran, Islamic Republic of` |
+| CHK-07 | PASS | 4 OMDb lookups, no hand-written replace map |
+| CHK-08 | PASS | 101 of 101 |
+| CHK-09 | PASS | first pass ever; run 4's four impossible dates are now honest nulls |
+| CHK-10 | PASS | `$ 4o8,035,783` → 408035783, reported with the raw value |
+
+**What changed since run 4.** Three prompt rules (real calendar dates; magnitude check with
+the typo rule; use the countries CSV) and one engine change: if nothing is saved by turn 6, the
+engine appends one message telling the model to write the CSV on its next call. The first
+attempt at run 5 had the prompt rules but not the nudge, and stalled exactly like runs 2 and 3:
+16 turns of rebuilding from raw, nothing on disk. The nudge fired at turn 7 of the second
+attempt and the CSV was saved one turn later.
+
+**Costs of the honesty rules.** Five null dates versus run 4's three: the agent now refuses
+`10-29-99` and `21-11-46` as ambiguous instead of guessing. Correct under provenance, and two
+fewer data points.
+
+**Still wrong, not yet checked.** The report hardcodes several counts as literals ("95 dates
+parsed"), against the HONESTY rule. No check covers the report yet. And a null-count check is
+missing: the first attempt at run 5 nulled South Korea and Iran instead of mapping them, and
+CHK-06 passed because it ignores nulls. Every "no bad values" check needs a "kept the data"
+partner; CHK-06 doesn't have one.
+
+**Score history:** run 1 = 70 · run 4 = 0 · run 5 = 92 (all harness-scored).
